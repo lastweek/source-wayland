@@ -1,234 +1,103 @@
-wayland_version = meson.project_version().split('.')
-wayland_version_h = configuration_data()
-wayland_version_h.set('WAYLAND_VERSION', meson.project_version())
-wayland_version_h.set('WAYLAND_VERSION_MAJOR', wayland_version[0].to_int())
-wayland_version_h.set('WAYLAND_VERSION_MINOR', wayland_version[1].to_int())
-wayland_version_h.set('WAYLAND_VERSION_MICRO', wayland_version[2].to_int())
-configure_file(
-	input: 'wayland-version.h.in',
-	output: 'wayland-version.h',
-	configuration: wayland_version_h,
-	install: get_option('libraries'),
-	install_dir: join_paths(get_option('prefix'), get_option('includedir'))
+project(
+	'wayland', 'c', 'cpp',
+	version: '1.18.90',
+	license: 'MIT',
+	meson_version: '>= 0.52.1',
+	default_options: [
+		'warning_level=2',
+		'buildtype=debugoptimized'
+	]
 )
 
+config_h = configuration_data()
+config_h.set_quoted('PACKAGE', meson.project_name())
+config_h.set_quoted('PACKAGE_VERSION', meson.project_version())
 
-wayland_util = static_library(
-	'wayland-util',
-	sources: 'wayland-util.c'
+compiler_flags = [
+	'-Wno-unused-parameter',
+	'-Wstrict-prototypes',
+	'-Wmissing-prototypes',
+	'-fvisibility=hidden',
+]
+
+cc = meson.get_compiler('c')
+add_project_arguments(
+	cc.get_supported_arguments(compiler_flags),
+	language: 'c'
 )
 
-wayland_util_dep = declare_dependency(
-	link_with: wayland_util,
-	include_directories: include_directories('.')
-)
+foreach h: [ 'sys/prctl.h' ]
+	config_h.set('HAVE_' + h.underscorify().to_upper(), cc.has_header(h))
+endforeach
 
-if get_option('scanner')
-	# wayland-scanner
-
-	configure_file(
-		input: '../protocol/wayland.dtd',
-		output: 'wayland.dtd.embed',
-		copy: true
-	)
-
-	wayland_scanner_sources = [ 'scanner.c', 'dtddata.S' ]
-	wayland_scanner_includes = [ root_inc, protocol_inc ]
-
-	wayland_scanner = executable(
-		'wayland-scanner',
-		wayland_scanner_sources,
-		c_args: [ '-include', 'config.h' ],
-		include_directories: wayland_scanner_includes,
-		dependencies: [ scanner_deps, wayland_util_dep, ],
-		install: true
-	)
-
-	pkgconfig.generate(
-		name: 'Wayland Scanner',
-		description: 'Wayland scanner',
-		version: meson.project_version(),
-		variables: [
-			'datarootdir=' + join_paths('${prefix}', get_option('datadir')),
-			'pkgdatadir=' + join_paths('${datarootdir}', meson.project_name()),
-			'bindir=' + join_paths('${prefix}', get_option('bindir')),
-			'wayland_scanner=${bindir}/wayland-scanner'
-		],
-		filebase: 'wayland-scanner'
-	)
-endif
-
-if meson.is_cross_build() or not get_option('scanner')
-	scanner_dep = dependency('wayland-scanner', native: true, version: meson.project_version())
-	wayland_scanner_for_build = find_program(scanner_dep.get_pkgconfig_variable('wayland_scanner'))
-else
-	wayland_scanner_for_build = wayland_scanner
-endif
+have_funcs = [
+	'accept4',
+	'mkostemp',
+	'posix_fallocate',
+	'prctl',
+	'memfd_create',
+	'strndup',
+]
+foreach f: have_funcs
+	config_h.set('HAVE_' + f.underscorify().to_upper(), cc.has_function(f))
+endforeach
 
 if get_option('libraries')
-	# wayland libraries
+	ffi_dep = dependency('libffi')
 
-	mathlib_dep = cc.find_library('m', required: false)
-	threads_dep = dependency('threads', required: false)
-
-	wayland_private = static_library(
-		'wayland-private',
-		sources: [
-			'connection.c',
-			'wayland-os.c'
-		],
-		dependencies: [ ffi_dep, ]
-	)
-
-	wayland_private_dep = declare_dependency(
-		link_with: wayland_private,
-		include_directories: include_directories('.')
-	)
-
-	generated_headers = [
-		{
-			'scanner_args': ['server-header'],
-			'output': 'wayland-server-protocol.h',
-			'install': true,
-		},
-		{
-			'scanner_args': ['server-header', '-c'],
-			'output': 'wayland-server-protocol-core.h',
-			'install': false,
-		},
-		{
-			'scanner_args': ['client-header'],
-			'output': 'wayland-client-protocol.h',
-			'install': true,
-		},
-		{
-			'scanner_args': ['client-header', '-c'],
-			'output': 'wayland-client-protocol-core.h',
-			'install': false,
-		},
+	decls = [
+		{ 'header': 'sys/signalfd.h', 'symbol': 'SFD_CLOEXEC' },
+		{ 'header': 'sys/timerfd.h', 'symbol': 'TFD_CLOEXEC' },
+		{ 'header': 'time.h', 'symbol': 'CLOCK_MONOTONIC' },
 	]
 
-	foreach gen: generated_headers
-		scanner_args = gen['scanner_args']
-		output_file = gen['output']
-		install_file = gen['install']
-		install_dir = join_paths(get_option('prefix'), get_option('includedir'))
-		target_name = output_file.underscorify()
-
-		target = custom_target(
-			target_name,
-			command: [
-				wayland_scanner_for_build, '-s', scanner_args,
-				'@INPUT@', '@OUTPUT@'
-			],
-			input: wayland_protocol_xml,
-			output: output_file,
-			install: install_file,
-			install_dir: install_dir
-		)
-
-		set_variable(target_name, target)
+	foreach d: decls
+		if not cc.has_header_symbol(d['header'], d['symbol'])
+			error('@0@ is needed to compile Wayland libraries'.format(d['symbol']))
+		endif
 	endforeach
+endif
 
-	wayland_protocol_c = custom_target(
-		'protocol source',
-		command: [
-			wayland_scanner_for_build, '-s', 'public-code', '@INPUT@', '@OUTPUT@'
-		],
-		input: wayland_protocol_xml,
-		output: 'wayland-protocol.c'
-	)
+scanner_deps = [ dependency('expat') ]
 
-	wayland_server = library(
-		'wayland-server',
-		sources: [
-			wayland_server_protocol_core_h,
-			wayland_server_protocol_h,
-			wayland_protocol_c,
-			'wayland-server.c',
-			'wayland-shm.c',
-			'event-loop.c'
-		],
-		version: '0.1.0',
-		dependencies: [
-			ffi_dep,
-			wayland_private_dep,
-			wayland_util_dep,
-			mathlib_dep,
-			threads_dep
-		],
-		include_directories: root_inc,
-		install: true
-	)
+if get_option('dtd_validation')
+	scanner_deps += dependency('libxml-2.0')
+	config_h.set('HAVE_LIBXML', 1)
+endif
 
-	wayland_server_dep = declare_dependency(
-		link_with: wayland_server,
-		include_directories: [ root_inc, include_directories('.') ],
-		dependencies: [ ffi_dep, mathlib_dep, threads_dep ],
-		sources: [
-			wayland_server_protocol_core_h,
-			wayland_server_protocol_h
-		]
-	)
+configure_file(
+	output: 'config.h',
+	configuration: config_h,
+)
 
-	pkgconfig.generate(
-		wayland_server,
-		name: 'Wayland Server',
-		description: 'Server side implementation of the Wayland protocol',
-		version: meson.project_version(),
-		filebase: 'wayland-server',
-		variables: [
-			'datarootdir=' + join_paths('${prefix}', get_option('datadir')),
-			'pkgdatadir=' + join_paths('${datarootdir}', meson.project_name())
-		]
-	)
+pkgconfig = import('pkgconfig')
 
-	wayland_client = library(
-		'wayland-client',
-		sources: [
-			wayland_client_protocol_core_h,
-			wayland_client_protocol_h,
-			wayland_protocol_c,
-			'wayland-client.c'
-		],
-		version: '0.3.0',
-		dependencies: [
-			ffi_dep,
-			wayland_private_dep,
-			wayland_util_dep,
-			mathlib_dep,
-			threads_dep
-		],
-		include_directories: root_inc,
-		install: true
-	)
+wayland_protocol_xml = files('protocol/wayland.xml')
 
-	pkgconfig.generate(
-		wayland_client,
-		name: 'Wayland Client',
-		description: 'Wayland client side library',
-		version: meson.project_version(),
-		filebase: 'wayland-client',
-		variables: [
-			'datarootdir=' + join_paths('${prefix}', get_option('datadir')),
-			'pkgdatadir=' + join_paths('${datarootdir}', meson.project_name())
-		]
-	)
+root_inc = include_directories('.')
+protocol_inc = include_directories('protocol')
+src_inc = include_directories('src')
 
-	wayland_client_dep = declare_dependency(
-		link_with: wayland_client,
-		include_directories: [ root_inc, include_directories('.') ],
-		sources: [
-			wayland_client_protocol_core_h,
-			wayland_client_protocol_h
-		]
-	)
+subdir('src')
 
-	install_headers([
-		'wayland-util.h',
-		'wayland-server.h',
-		'wayland-server-core.h',
-		'wayland-client.h',
-		'wayland-client-core.h',
+if get_option('libraries')
+	subdir('cursor')
+	subdir('egl')
+	subdir('tests')
+	if get_option('documentation')
+		subdir('doc')
+	endif
+endif
+
+if get_option('scanner')
+	install_data([
+		'wayland-scanner.mk',
+		'protocol/wayland.xml',
+		'protocol/wayland.dtd',
 	])
+
+	install_data(
+		[ 'wayland-scanner.m4' ],
+		install_dir: join_paths(get_option('prefix'), get_option('datadir'), 'aclocal'),
+	)
 endif
